@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Displays
+GenericName=Monitor arrangement
+Comment=Arrange monitors, scale, and resolution
+Exec=omarchy-shell shell summon io.github.stevederico.omarchy-displays
+Icon=video-display
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=omarchy;monitor;display;arrange;scale;resolution;
+StartupNotify=false

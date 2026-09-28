@@ -1,0 +1,8 @@
+.DS_Store
+*.bak
+*~
+*.swp
+.idea/
+.vscode/
+node_modules/
+SUMMARY.md

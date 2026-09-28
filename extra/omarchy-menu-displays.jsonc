@@ -1,0 +1,9 @@
+{
+  "setup.displays": {
+    "icon": "󰍺",
+    "label": "Displays",
+    "aliases": ["displays", "monitors", "arrange"],
+    "description": "Arrange monitors, scale, and resolution",
+    "action": "omarchy-shell shell summon io.github.stevederico.omarchy-displays"
+  }
+}
