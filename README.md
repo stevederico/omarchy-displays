@@ -63,7 +63,7 @@ Keep adds one managed block to the end of `monitors.lua`, in the same
 -- omarchy-displays: begin
 -- Written by the Displays plugin. Edits inside this block are overwritten.
 -- Delete the whole block to fall back to the rules above it.
-hl.monitor({ output = "desc:Dell Inc. DELL U2719D", mode = "2560x1440@59.95", position = "0x0", scale = 1 })
+hl.monitor({ output = "desc:Dell Inc. DELL U2719D", mode = "2560x1440@60", position = "0x0", scale = 1 })
 hl.monitor({ output = "desc:Samsung Electric Company U28H75x", mode = "3840x2160@30", position = "2560x0", scale = 1.5 })
 -- omarchy-displays: end
 ```
@@ -73,6 +73,8 @@ hl.monitor({ output = "desc:Samsung Electric Company U28H75x", mode = "3840x2160
 - The block goes last because Hyprland lets the last matching monitor rule
   win.
 - Saving again replaces the block. It never stacks.
+- A refresh rate your own rule writes is kept when it is within 0.1 Hz of
+  the chosen mode: `@60` stays `@60` on a 59.95 Hz panel.
 - Displays are matched by panel (`desc:`), not connector, so a display that
   moves from `DP-1` to `DP-2` keeps its place. If your own rules already
   name a selector for a display, the block reuses it. Identical twin
@@ -188,6 +190,11 @@ cp extra/sd.displays.desktop ~/.local/share/applications/
 
 To float the window instead of tiling it, merge
 `extra/omarchy-displays-window.lua` into `~/.config/hypr/hyprland.lua`.
+
+The window opens on the active workspace of the focused monitor, like any
+new window. If it lands somewhere else, a hook in your Hyprland config is
+moving new windows off that workspace. The same file has an
+`is_displays_window(win)` check to skip it there.
 
 ## Undo a saved arrangement
 

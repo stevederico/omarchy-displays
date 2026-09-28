@@ -847,27 +847,70 @@ function unquoteLua(literal) {
   return literal.substring(1, literal.length - 1).replace(/\\(.)/g, "$1")
 }
 
-// Output selectors the user's own hl.monitor rules already use, outside the
-// managed block. Resolves `local dell = "desc:..."` style variables.
-function findMonitorSelectors(luaText) {
+var LUA_STRING = "\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*'"
+
+// The user's own hl.monitor rules, outside the managed block, in file order:
+// [{ selector, mode }]. Resolves `local left = "desc:..."` style variables.
+// mode is the literal mode string, or "" when it is not a plain string.
+// The catch-all (output = "") is left out.
+function findMonitorRules(luaText) {
   var source = stripLuaComments(removeManagedBlock(luaText).text)
   var locals = {}
-  var assign = /(?:^|[\s;])local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')/g
+  var assign = new RegExp("(?:^|[\\s;])local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(" + LUA_STRING + ")", "g")
   var match
   while ((match = assign.exec(source)) !== null) locals[match[1]] = unquoteLua(match[2])
 
   var out = []
-  var seen = {}
-  var rule = /hl\.monitor\s*\(\s*\{[^}]*?\boutput\s*=\s*("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|[A-Za-z_][A-Za-z0-9_]*)/g
-  while ((match = rule.exec(source)) !== null) {
-    var token = match[1]
+  var table = /hl\.monitor\s*\(\s*\{([^}]*)\}/g
+  var outputField = new RegExp("\\boutput\\s*=\\s*(" + LUA_STRING + "|[A-Za-z_][A-Za-z0-9_]*)")
+  var modeField = new RegExp("\\bmode\\s*=\\s*(" + LUA_STRING + ")")
+  while ((match = table.exec(source)) !== null) {
+    var output = outputField.exec(match[1])
+    if (!output) continue
+    var token = output[1]
     var first = token.charAt(0)
     var selector = (first === "\"" || first === "'") ? unquoteLua(token) : locals[token]
-    if (typeof selector !== "string" || selector === "" || seen[selector]) continue
-    seen[selector] = true
-    out.push(selector)
+    if (typeof selector !== "string" || selector === "") continue
+    var mode = modeField.exec(match[1])
+    out.push({ selector: selector, mode: mode ? unquoteLua(mode[1]) : "" })
   }
   return out
+}
+
+// Output selectors the user's own rules already use, first use first.
+function findMonitorSelectors(luaText) {
+  var rules = findMonitorRules(luaText)
+  var out = []
+  var seen = {}
+  for (var i = 0; i < rules.length; i++) {
+    if (seen[rules[i].selector]) continue
+    seen[rules[i].selector] = true
+    out.push(rules[i].selector)
+  }
+  return out
+}
+
+// How far a configured refresh rate may sit from the advertised mode and
+// still be kept as written. Configs say @60 for a 59.95 Hz panel; Hyprland
+// picks the closest mode either way.
+var CONFIGURED_REFRESH_TOLERANCE = 0.1
+
+// The refresh rate as the user's own rule for this display writes it, when
+// that rule asks for the same resolution at a rate within
+// CONFIGURED_REFRESH_TOLERANCE of the chosen one. The last matching rule
+// wins, as in Hyprland. "" when there is nothing to keep.
+function configuredRefresh(entry, configuredRules) {
+  var rules = configuredRules || []
+  var kept = ""
+  for (var i = 0; i < rules.length; i++) {
+    if (!selectorMatches(rules[i].selector, entry)) continue
+    var written = /^\s*(\d+)x(\d+)@(\d+(?:\.\d+)?)(?:Hz)?\s*$/.exec(String(rules[i].mode || ""))
+    if (!written) continue
+    if (parseInt(written[1], 10) !== entry.width || parseInt(written[2], 10) !== entry.height) continue
+    if (Math.abs(parseFloat(written[3]) - entry.refresh) > CONFIGURED_REFRESH_TOLERANCE + 1e-9) continue
+    kept = written[3]
+  }
+  return kept
 }
 
 // Hyprland matches desc: by prefix and everything else by connector name.
@@ -887,8 +930,8 @@ function countMatches(selector, entries) {
   return count
 }
 
-// Match by panel, not connector: connector names move between boots
-// (DP-1 → DP-2 after a GPU reseat). Order of preference:
+// Match by panel, not connector: connector names can move between boots
+// (DP-1 → DP-2). Order of preference:
 //   1. a selector the user's rules already use for this display
 //   2. desc:<description> when it singles out one display
 //   3. the connector name
@@ -911,12 +954,16 @@ function selectorFor(entry, entries, knownSelectors) {
   return entry.name
 }
 
-function ruleLua(entry, selector) {
+// refreshText, when given, is written in place of the entry's refresh rate
+// (see configuredRefresh). It must be digits with an optional fraction.
+function ruleLua(entry, selector, refreshText) {
   var output = luaQuote(selector)
   if (output === null) return null
+  var refresh = /^\d+(?:\.\d+)?$/.test(String(refreshText || ""))
+    ? String(refreshText) : formatRefresh(entry.refresh)
   var fields = [
     "output = " + output,
-    "mode = \"" + modeKey(entry.width, entry.height, entry.refresh) + "\"",
+    "mode = \"" + entry.width + "x" + entry.height + "@" + refresh + "\"",
     "position = \"" + Math.round(entry.x) + "x" + Math.round(entry.y) + "\"",
     "scale = " + formatScale(entry.scale)
   ]
@@ -924,10 +971,11 @@ function ruleLua(entry, selector) {
   return "hl.monitor({ " + fields.join(", ") + " })"
 }
 
-function rulesFor(layout, knownSelectors) {
+function rulesFor(layout, knownSelectors, configuredRules) {
   var lines = []
   for (var i = 0; i < layout.length; i++) {
-    var line = ruleLua(layout[i], selectorFor(layout[i], layout, knownSelectors))
+    var line = ruleLua(layout[i], selectorFor(layout[i], layout, knownSelectors),
+                       configuredRefresh(layout[i], configuredRules))
     if (line === null) return null
     lines.push(line)
   }
@@ -935,8 +983,8 @@ function rulesFor(layout, knownSelectors) {
 }
 
 // Lua for `hyprctl eval`: the new arrangement, live, nothing written.
-function applyLua(layout, knownSelectors) {
-  var lines = rulesFor(layout, knownSelectors)
+function applyLua(layout, knownSelectors, configuredRules) {
+  var lines = rulesFor(layout, knownSelectors, configuredRules)
   return lines === null ? null : lines.join("\n")
 }
 
@@ -955,8 +1003,8 @@ function revertLua(snapshot) {
 
 // ------------------------------------------------------ monitors.lua block
 
-function managedBlock(layout, knownSelectors) {
-  var lines = rulesFor(layout, knownSelectors)
+function managedBlock(layout, knownSelectors, configuredRules) {
+  var lines = rulesFor(layout, knownSelectors, configuredRules)
   if (lines === null) return null
   return [
     BLOCK_BEGIN,
@@ -1029,8 +1077,9 @@ function buildPlan(options) {
     fileState: fileState, canPersist: false
   }
 
+  var configured = fileState === "present" ? findMonitorRules(fileText) : []
   var known = fileState === "present" ? findMonitorSelectors(fileText) : []
-  var apply = applyLua(layout, known)
+  var apply = applyLua(layout, known, configured)
   var revert = revertLua(snapshot)
   if (apply === null)
     errors.push({ code: "bad-selector", message: "A display description cannot be written safely" })
@@ -1040,7 +1089,7 @@ function buildPlan(options) {
 
   plan.applyLua = apply
   plan.revertLua = revert
-  plan.block = managedBlock(layout, known)
+  plan.block = managedBlock(layout, known, configured)
 
   if (fileState !== "present" && fileState !== "missing") {
     warnings.push({ code: "file-unreadable",
@@ -1501,7 +1550,10 @@ if (typeof module !== "undefined") {
     validateLayout: validateLayout,
     luaQuote: luaQuote,
     stripLuaComments: stripLuaComments,
+    findMonitorRules: findMonitorRules,
     findMonitorSelectors: findMonitorSelectors,
+    CONFIGURED_REFRESH_TOLERANCE: CONFIGURED_REFRESH_TOLERANCE,
+    configuredRefresh: configuredRefresh,
     selectorMatches: selectorMatches,
     selectorFor: selectorFor,
     ruleLua: ruleLua,

@@ -473,6 +473,97 @@ test("findMonitorSelectors skips comments, the catch-all, and the managed block"
   assert.deepEqual(logic.findMonitorSelectors(lua), ["eDP-1", "HDMI-A-2"])
 })
 
+test("findMonitorRules pairs each selector with its written mode", () => {
+  assert.deepEqual(logic.findMonitorRules(monitorsLua), [
+    { selector: "desc:Dell Inc. DELL U2719D", mode: "2560x1440@60" },
+    { selector: "desc:Samsung Electric Company U28H75x", mode: "3840x2160@30" },
+    { selector: "eDP-1", mode: "preferred" }
+  ])
+  const lua = [
+    "local m = \"1920x1080@60\"",
+    "hl.monitor({ mode = '2560x1440@144.00Hz', output = 'DP-3' })",
+    "hl.monitor({ output = \"DP-4\", mode = m })",
+    "hl.monitor({ output = \"DP-5\" })",
+    logic.BLOCK_BEGIN,
+    "hl.monitor({ output = \"DP-3\", mode = \"2560x1440@59.95\" })",
+    logic.BLOCK_END
+  ].join("\n")
+  assert.deepEqual(logic.findMonitorRules(lua), [
+    { selector: "DP-3", mode: "2560x1440@144.00Hz" },
+    { selector: "DP-4", mode: "" },
+    { selector: "DP-5", mode: "" }
+  ])
+})
+
+test("configuredRefresh keeps the written rate within 0.1 Hz", () => {
+  const dell = logic.entryByName(fixtureLayout(), DELL)
+  assert.equal(dell.refresh, 59.95)
+  assert.equal(logic.CONFIGURED_REFRESH_TOLERANCE, 0.1)
+  const rule = (mode, selector) => [{ selector: selector || "desc:Dell Inc. DELL U2719D", mode: mode }]
+  assert.equal(logic.configuredRefresh(dell, rule("2560x1440@60")), "60")
+  assert.equal(logic.configuredRefresh(dell, rule("2560x1440@60.00Hz")), "60.00")
+  assert.equal(logic.configuredRefresh(dell, rule("2560x1440@59.85")), "59.85")
+  assert.equal(logic.configuredRefresh(dell, rule("2560x1440@59.95")), "59.95")
+  assert.equal(logic.configuredRefresh(dell, rule("2560x1440@60", "DP-2")), "60")
+  // Too far off, another resolution, not this display, or not a mode.
+  assert.equal(logic.configuredRefresh(dell, rule("2560x1440@60.1")), "")
+  assert.equal(logic.configuredRefresh(dell, rule("2560x1440@75")), "")
+  assert.equal(logic.configuredRefresh(dell, rule("1920x1080@60")), "")
+  assert.equal(logic.configuredRefresh(dell, rule("2560x1440@60", "desc:Samsung")), "")
+  assert.equal(logic.configuredRefresh(dell, rule("preferred")), "")
+  assert.equal(logic.configuredRefresh(dell, rule("")), "")
+  assert.equal(logic.configuredRefresh(dell, []), "")
+  assert.equal(logic.configuredRefresh(dell, undefined), "")
+  // The last matching rule wins, as in Hyprland.
+  assert.equal(logic.configuredRefresh(dell, [
+    { selector: "DP-2", mode: "2560x1440@60" },
+    { selector: "desc:Dell Inc.", mode: "2560x1440@59.9" }
+  ]), "59.9")
+})
+
+test("the configured @60 is kept in apply, block, and saved file", () => {
+  const snapshot = logic.parseMonitors(monitorsJson)
+  const plan = logic.buildPlan({
+    snapshot: snapshot, layout: logic.setScale(logic.arrangeable(snapshot), DELL, 2),
+    fileText: monitorsLua, fileState: "present"
+  })
+  assert.equal(plan.ok, true)
+  for (const text of [plan.applyLua, plan.block, plan.fileText]) {
+    assert.match(text, /output = "desc:Dell Inc\. DELL U2719D", mode = "2560x1440@60", /)
+    assert.doesNotMatch(text.replace(monitorsLua, ""), /@59\.95/)
+  }
+  // The fallback revert restores what Hyprland reported, not the config.
+  assert.match(plan.revertLua, /output = "DP-2", mode = "2560x1440@59\.95"/)
+  // Hyprland will still report 59.95 for @60. The check after Apply
+  // compares against the chosen mode, so the refresh is not a difference.
+  const dellDiff = logic.layoutDiff([logic.entryByName(plan.layout, DELL)], snapshot)
+  assert.deepEqual(dellDiff, ["DP-2 scale 1, wanted 2"])
+})
+
+test("a new refresh rate is written as chosen, not as configured", () => {
+  const snapshot = logic.parseMonitors(monitorsJson)
+  const layout = logic.setResolution(logic.arrangeable(snapshot), SAMSUNG, 1920, 1080)
+  const refreshed = logic.setRefresh(layout, SAMSUNG, 60)
+  const plan = logic.buildPlan({ snapshot: snapshot, layout: refreshed, fileText: monitorsLua, fileState: "present" })
+  assert.match(plan.applyLua, /U28H75x", mode = "1920x1080@60"/)
+  const slow = logic.setRefresh(layout, SAMSUNG, 24)
+  const slowPlan = logic.buildPlan({ snapshot: snapshot, layout: slow, fileText: monitorsLua, fileState: "present" })
+  assert.match(slowPlan.applyLua, /U28H75x", mode = "1920x1080@24"/)
+})
+
+test("without a config the reported refresh is written", () => {
+  const snapshot = logic.parseMonitors(monitorsJson)
+  const plan = logic.buildPlan({ snapshot: snapshot, layout: logic.arrangeable(snapshot), fileText: "", fileState: "missing" })
+  assert.match(plan.applyLua, /mode = "2560x1440@59\.95"/)
+})
+
+test("ruleLua only writes a refresh text that is a number", () => {
+  const dell = logic.entryByName(fixtureLayout(), DELL)
+  assert.match(logic.ruleLua(dell, "DP-2", "60"), /mode = "2560x1440@60"/)
+  assert.match(logic.ruleLua(dell, "DP-2", "60\"), os.exit() --"), /mode = "2560x1440@59\.95"/)
+  assert.match(logic.ruleLua(dell, "DP-2", ""), /mode = "2560x1440@59\.95"/)
+})
+
 test("selectorFor prefers the user's selector, then description, then connector", () => {
   const layout = fixtureLayout()
   const dell = logic.entryByName(layout, DELL)
@@ -632,7 +723,8 @@ test("buildPlan produces apply, revert, and file text for a swap", () => {
   })
   assert.equal(plan.ok, true)
   assert.equal(plan.applyLua, [
-    "hl.monitor({ output = \"desc:Dell Inc. DELL U2719D\", mode = \"2560x1440@59.95\", position = \"2560x0\", scale = 1 })",
+    // The config says @60 for the 59.95 Hz panel; that is what gets written.
+    "hl.monitor({ output = \"desc:Dell Inc. DELL U2719D\", mode = \"2560x1440@60\", position = \"2560x0\", scale = 1 })",
     "hl.monitor({ output = \"desc:Samsung Electric Company U28H75x\", mode = \"3840x2160@30\", position = \"0x0\", scale = 1.5 })"
   ].join("\n"))
   assert.equal(plan.revertLua, logic.revertLua(snapshot))
@@ -886,6 +978,18 @@ test("layoutDiff says what Hyprland shows differently", () => {
 test("the settle wait is about 5 seconds", () => {
   assert.equal(logic.SETTLE_TIMEOUT_MS, 5000)
   assert.ok(logic.SETTLE_POLL_MS > 0 && logic.SETTLE_POLL_MS < 1000)
+})
+
+test("the window rule extra is valid Lua and matches the window", (t) => {
+  const extra = path.join(__dirname, "..", "extra", "omarchy-displays-window.lua")
+  const qml = fs.readFileSync(path.join(__dirname, "..", "plugin", "sd.displays", "run", "Displays.qml"), "utf8")
+  const lua = fs.readFileSync(extra, "utf8")
+  assert.match(qml, /FloatingWindow \{\s*id: window\s*title: "Displays"/)
+  assert.match(lua, /class == "org\.quickshell" and title == "Displays"/)
+  assert.match(lua, /title = "\^Displays\$"/)
+  if (spawnSync("luac", ["-v"]).error) return t.skip("luac not installed")
+  const result = spawnSync("luac", ["-p", extra], { encoding: "utf8" })
+  assert.equal(result.status, 0, result.stderr)
 })
 
 test("touch script creates the token and its folder", (t) => {

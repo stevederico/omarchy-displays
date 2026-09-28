@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.stevederico.omarchy-displays",
   "name": "Displays",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "sd",
   "license": "MIT",
   "description": "Arrange monitors like macOS: drag to position, pick scale and resolution, apply with a 15-second keep-or-revert.",

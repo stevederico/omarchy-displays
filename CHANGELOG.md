@@ -3,6 +3,13 @@
 - rotation control
 - enable and disable displays
 
+0.3.0
+
+  Keep configured refresh
+  Parse configured modes
+  Add window helper
+  Document workspace hooks
+
 0.2.0
 
   Revert by reload
