@@ -295,7 +295,7 @@ Item {
     root.plan = next
     root.saveError = ""
     root.settleNote = ""
-    root.token = root.runtimeDir + "/" + Date.now()
+    root.token = root.runtimeDir + "/" + Logic.tokenName(Date.now(), Math.random())
     // The watchdog goes first, so a revert is already scheduled by the time
     // the layout changes, whatever that change does to this process.
     Quickshell.execDetached(["sh", "-c", Logic.WATCHDOG_SCRIPT, "omarchy-displays-watchdog",
@@ -327,8 +327,12 @@ Item {
 
   function keep() {
     if (root.phase !== "confirming" || !root.plan) return
-    if (!root.plan.canPersist || root.saveError) {
-      var why = root.saveError
+    // Keep only ever writes the real monitors.lua. parsePayload already
+    // keeps a live run on it; this holds even if that ever changes.
+    var wrongFile = root.dryRun || root.monitorsPath !== root.defaultMonitorsPath
+    if (wrongFile || !root.plan.canPersist || root.saveError) {
+      var why = wrongFile ? "Keep only saves to " + root.defaultMonitorsPath
+        : root.saveError
         || (root.plan.warnings.length ? root.plan.warnings[0].message : "monitors.lua cannot be written")
       root.touch(root.token + ".keep")
       root.setStatus("Layout is live but not saved. " + why, true)
@@ -918,6 +922,8 @@ Item {
               return "An earlier Apply is still waiting to revert"
             if (root.fileState === "unreadable" && root.phase !== "loading")
               return "monitors.lua cannot be read. Keep will not save"
+            if (root.fileState === "toolarge" && root.phase !== "loading")
+              return "monitors.lua is over " + Math.floor(Logic.MAX_ARG_BYTES / 1024) + " KiB. Keep will not save"
             if (root.ignored.length)
               return "Not arranged: " + root.ignored.map(function(d) { return d.name }).join(", ")
             return root.dirty ? "Unapplied changes" : ""

@@ -45,7 +45,11 @@ saved the file or the window already reverted. If the new layout takes down
 the screen, the panel, or the whole shell, the watchdog still reverts.
 
 While a watchdog from an earlier Apply is still armed, Apply waits.
-Its token files live in `$XDG_RUNTIME_DIR/omarchy-displays/`.
+Its token files live in `$XDG_RUNTIME_DIR/omarchy-displays/`. That folder is
+owner-only (mode 700). Displays refuses it if it is a symlink or not yours.
+Each token file is created with a private temp name and renamed into place,
+so a symlink someone left at the token path is replaced, never written
+through.
 
 ### When Hyprland says no
 
@@ -84,9 +88,14 @@ hl.monitor({ output = "desc:Samsung Electric Company U28H75x", mode = "3840x2160
 - If the file changed after Displays read it, or the save fails for any
   reason, nothing is saved, the watchdog stays armed, and the window asks
   again: Revert, or keep the layout live without saving.
-- Files over 120 KiB are not saved (the Linux single-argument limit is
-  128 KiB).
-- A symlinked `monitors.lua` stays a symlink.
+- Keep only ever writes `~/.config/hypr/monitors.lua`. A summon payload
+  cannot point it at another file.
+- The new file is written to a private temp file next to the target and
+  renamed over it. The old file's permissions are kept.
+- Files over 120 KiB are not read or saved (the Linux single-argument limit
+  is 128 KiB).
+- A symlinked `monitors.lua` stays a symlink. Its target must be a regular
+  `.lua` file you own, or nothing is saved.
 
 ## Requirements and safety
 
@@ -133,11 +142,11 @@ omarchy plugin enable "$PLUGIN_ID"
 
 1. Have a way back that needs no screen, like an SSH session:
    `hyprctl reload` restores `monitors.lua`
-2. Open in dry run with a scratch file. Apply only shows the plan
-3. Reopen without dry run, keep the scratch file, and try a small move.
-   Let the countdown expire once, press Revert once
-4. Keep, then compare the scratch file with your real one
-5. Only then use it without `monitorsFile`
+2. Open in dry run on a scratch copy. Apply only shows the plan
+3. Reopen without dry run and try a small move. Let the countdown expire
+   once, press Revert once
+4. Keep. Your file is copied to `monitors.lua.bak.<unix time>` first, so
+   compare against that
 
 ## Use
 
@@ -151,12 +160,14 @@ Dry run. Apply shows the plan and changes nothing:
 omarchy-shell shell summon io.github.stevederico.omarchy-displays '{"dryRun":true}'
 ```
 
-Save to a scratch file instead of the real `monitors.lua`:
+Dry run against a scratch copy instead of the real `monitors.lua`.
+`monitorsFile` is honored only together with `dryRun`. Without it, Displays
+always uses `~/.config/hypr/monitors.lua`:
 
 ```sh
 cp ~/.config/hypr/monitors.lua ~/monitors-try.lua
 omarchy-shell shell summon io.github.stevederico.omarchy-displays \
-  '{"monitorsFile":"'"$HOME"'/monitors-try.lua"}'
+  '{"dryRun":true,"monitorsFile":"'"$HOME"'/monitors-try.lua"}'
 ```
 
 Print the current plan from a terminal while the window is open:

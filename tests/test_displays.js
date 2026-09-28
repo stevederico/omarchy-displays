@@ -904,6 +904,58 @@ test("watchdog passes hostile Lua through as data", (t) => {
   assert.equal(stub.calls(), "reload\neval " + lua + "\n")
 })
 
+test("watchdog never writes through a planted symlink", (t) => {
+  const dir = tempDir(t)
+  const stub = stubHyprctl(dir)
+  const runDir = path.join(dir, "run")
+  fs.mkdirSync(runDir, { mode: 0o700 })
+  const victim = path.join(dir, "victim")
+  fs.writeFileSync(victim, "precious\n")
+  const token = path.join(runDir, "7")
+  fs.symlinkSync(victim, token + ".live")
+  fs.writeFileSync(token + ".revert", "")
+  const result = runScript(logic.WATCHDOG_SCRIPT, "omarchy-displays-watchdog", [token, "hl.monitor({})", "30", stub.bin])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(fs.readFileSync(victim, "utf8"), "precious\n")
+  assert.equal(stub.calls(), "reload\n")
+  assert.deepEqual(fs.readdirSync(runDir), [])
+})
+
+test("watchdog refuses a token folder that is a symlink", (t) => {
+  const dir = tempDir(t)
+  const stub = stubHyprctl(dir)
+  const real = path.join(dir, "real")
+  const link = path.join(dir, "link")
+  fs.mkdirSync(real)
+  fs.symlinkSync(real, link)
+  const result = runScript(logic.WATCHDOG_SCRIPT, "omarchy-displays-watchdog",
+    [path.join(link, "7"), "hl.monitor({})", "1", stub.bin])
+  assert.equal(result.status, 1)
+  assert.deepEqual(fs.readdirSync(real), [])
+  assert.equal(stub.calls(), "")
+})
+
+test("scan leaves a symlinked folder alone and drops stale temp files", (t) => {
+  const dir = tempDir(t)
+  const real = path.join(dir, "real")
+  const link = path.join(dir, "link")
+  fs.mkdirSync(real)
+  fs.writeFileSync(path.join(real, "1.live"), "999999999\n")
+  fs.symlinkSync(real, link)
+  assert.equal(runScript(logic.SCAN_SCRIPT, "omarchy-displays-scan", [link]).stdout, "0\n")
+  assert.ok(fs.existsSync(path.join(real, "1.live")))
+
+  fs.rmSync(path.join(real, "1.live"))
+  const stale = path.join(real, "2.live.tmp.aB3xYz")
+  const fresh = path.join(real, "3.keep.tmp.zZ9yXw")
+  const mine = path.join(real, "notes.txt")
+  for (const file of [stale, fresh, mine]) fs.writeFileSync(file, "")
+  const old = new Date(Date.now() - 3600 * 1000)
+  fs.utimesSync(stale, old, old)
+  assert.equal(runScript(logic.SCAN_SCRIPT, "omarchy-displays-scan", [real]).stdout, "0\n")
+  assert.deepEqual(fs.readdirSync(real).sort(), ["3.keep.tmp.zZ9yXw", "notes.txt"])
+})
+
 test("scan counts an armed watchdog and clears what dead ones left", async (t) => {
   const dir = tempDir(t)
   const stub = stubHyprctl(dir)
@@ -999,6 +1051,52 @@ test("touch script creates the token and its folder", (t) => {
   assert.equal(fs.readFileSync(token, "utf8"), "")
 })
 
+test("touch script keeps its folder owner-only and its files private", (t) => {
+  const dir = tempDir(t)
+  const folder = path.join(dir, "deep", "er")
+  assert.equal(runScript(logic.TOUCH_SCRIPT, "touch", [path.join(folder, "a.keep")]).status, 0)
+  assert.equal(fs.statSync(folder).mode & 0o777, 0o700)
+  assert.equal(fs.statSync(path.join(folder, "a.keep")).mode & 0o777, 0o600)
+
+  // A folder that already exists but is open to others is tightened.
+  const loose = path.join(dir, "loose")
+  fs.mkdirSync(loose, { mode: 0o755 })
+  fs.chmodSync(loose, 0o755)
+  assert.equal(runScript(logic.TOUCH_SCRIPT, "touch", [path.join(loose, "b.keep")]).status, 0)
+  assert.equal(fs.statSync(loose).mode & 0o777, 0o700)
+  assert.deepEqual(fs.readdirSync(loose), ["b.keep"])
+})
+
+test("touch script never writes through a planted symlink", (t) => {
+  const dir = tempDir(t)
+  const victim = path.join(dir, "victim")
+  fs.writeFileSync(victim, "precious\n")
+  const token = path.join(dir, "run", "7")
+  fs.mkdirSync(path.dirname(token), { mode: 0o700 })
+  fs.symlinkSync(victim, token + ".revert")
+  assert.equal(runScript(logic.TOUCH_SCRIPT, "touch", [token + ".revert"]).status, 0)
+  assert.equal(fs.readFileSync(victim, "utf8"), "precious\n")
+  assert.ok(fs.lstatSync(token + ".revert").isFile())
+
+  // A dangling link must not be created through either.
+  const outside = path.join(dir, "outside")
+  fs.symlinkSync(outside, token + ".keep")
+  assert.equal(runScript(logic.TOUCH_SCRIPT, "touch", [token + ".keep"]).status, 0)
+  assert.equal(fs.existsSync(outside), false)
+  assert.ok(fs.lstatSync(token + ".keep").isFile())
+  assert.deepEqual(fs.readdirSync(path.dirname(token)).sort(), ["7.keep", "7.revert"])
+})
+
+test("touch script refuses a token folder that is a symlink", (t) => {
+  const dir = tempDir(t)
+  const real = path.join(dir, "real")
+  const link = path.join(dir, "link")
+  fs.mkdirSync(real)
+  fs.symlinkSync(real, link)
+  assert.notEqual(runScript(logic.TOUCH_SCRIPT, "touch", [path.join(link, "x.keep")]).status, 0)
+  assert.deepEqual(fs.readdirSync(real), [])
+})
+
 test("read script reports present, missing, and unreadable", (t) => {
   const dir = tempDir(t)
   const file = path.join(dir, "monitors.lua")
@@ -1016,6 +1114,42 @@ test("read script reports present, missing, and unreadable", (t) => {
   fs.writeFileSync(file, "")
   assert.deepEqual(logic.parseReadOutput(runScript(logic.READ_SCRIPT, "read", [file]).stdout),
     { state: "present", text: "" })
+})
+
+test("read script refuses oversize and non-regular files", (t) => {
+  const dir = tempDir(t)
+  const limit = logic.MAX_ARG_BYTES
+  const atLimit = path.join(dir, "at.lua")
+  fs.writeFileSync(atLimit, "a".repeat(limit))
+  const read = logic.parseReadOutput(runScript(logic.READ_SCRIPT, "read", [atLimit]).stdout)
+  assert.equal(read.state, "present")
+  assert.equal(read.text.length, limit)
+
+  // Over the limit nothing is streamed, only the status line.
+  const over = path.join(dir, "over.lua")
+  fs.writeFileSync(over, "a".repeat(limit + 1))
+  const big = runScript(logic.READ_SCRIPT, "read", [over])
+  assert.equal(big.stdout, "toolarge\n")
+  assert.deepEqual(logic.parseReadOutput(big.stdout), { state: "toolarge", text: "" })
+
+  // A pipe and a device are not regular files. Neither may be opened.
+  const fifo = path.join(dir, "pipe.lua")
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0)
+  const pipe = spawnSync("sh", ["-c", logic.READ_SCRIPT, "read", fifo], { encoding: "utf8", timeout: 5000 })
+  assert.equal(pipe.status, 0)
+  assert.equal(pipe.stdout, "unreadable\n")
+  const zero = path.join(dir, "zero.lua")
+  fs.symlinkSync("/dev/zero", zero)
+  const device = spawnSync("sh", ["-c", logic.READ_SCRIPT, "read", zero], { encoding: "utf8", timeout: 5000 })
+  assert.equal(device.stdout, "unreadable\n")
+})
+
+test("an oversize monitors.lua is never saved", () => {
+  const plan = swapPlan("", "toolarge")
+  assert.equal(plan.ok, true)
+  assert.equal(plan.canPersist, false)
+  assert.deepEqual(plan.warnings.map((w) => w.code), ["file-too-large"])
+  assert.match(plan.warnings[0].message, /over 120 KiB/)
 })
 
 function swapPlan(fileText, fileState) {
@@ -1136,6 +1270,60 @@ test("persist writes through a symlink and leaves it a symlink", (t) => {
   assert.equal(fs.readFileSync(real + ".bak.7", "utf8"), monitorsLua)
 })
 
+test("persist writes only to a regular .lua file it owns", (t) => {
+  const dir = tempDir(t)
+  const plan = swapPlan(monitorsLua, "present")
+  // A link to a file that is not Lua, and a link to a folder.
+  const notes = path.join(dir, "notes.txt")
+  fs.writeFileSync(notes, monitorsLua)
+  const toNotes = path.join(dir, "monitors.lua")
+  fs.symlinkSync(notes, toNotes)
+  const refused = runScript(logic.PERSIST_SCRIPT, "persist", logic.persistArgs(plan, toNotes, "1"))
+  assert.equal(refused.status, 6)
+  assert.equal(fs.readFileSync(notes, "utf8"), monitorsLua)
+  assert.match(logic.persistError(6), /other than a \.lua file/)
+
+  const folder = path.join(dir, "folder.lua")
+  fs.mkdirSync(folder)
+  const toFolder = path.join(dir, "linked.lua")
+  fs.symlinkSync(folder, toFolder)
+  assert.equal(runScript(logic.PERSIST_SCRIPT, "persist", logic.persistArgs(plan, toFolder, "1")).status, 6)
+  assert.deepEqual(fs.readdirSync(folder), [])
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["folder.lua", "linked.lua", "monitors.lua", "notes.txt"])
+})
+
+test("persist never writes through a symlink at a backup or temp path", (t) => {
+  const dir = tempDir(t)
+  const file = path.join(dir, "monitors.lua")
+  fs.writeFileSync(file, monitorsLua)
+  const captured = path.join(dir, "captured")
+  // The stamp is a guessable clock reading, so a dangling link may wait there.
+  fs.symlinkSync(captured, file + ".bak.9")
+  const plan = swapPlan(monitorsLua, "present")
+  const result = runScript(logic.PERSIST_SCRIPT, "persist", logic.persistArgs(plan, file, "9"))
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(fs.existsSync(captured), false)
+  assert.equal(fs.readFileSync(file + ".bak.10", "utf8"), monitorsLua)
+  assert.equal(fs.readFileSync(file, "utf8"), plan.fileText)
+  // The temp file is unpredictable and gone after the rename.
+  assert.deepEqual(fs.readdirSync(dir).filter((f) => f.includes(".tmp.")), [])
+})
+
+test("persist keeps the mode of the file it replaces", (t) => {
+  const dir = tempDir(t)
+  const file = path.join(dir, "monitors.lua")
+  fs.writeFileSync(file, monitorsLua)
+  fs.chmodSync(file, 0o600)
+  const plan = swapPlan(monitorsLua, "present")
+  assert.equal(runScript(logic.PERSIST_SCRIPT, "persist", logic.persistArgs(plan, file, "1")).status, 0)
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600)
+
+  const fresh = path.join(dir, "new", "monitors.lua")
+  const created = swapPlan("", "missing")
+  assert.equal(runScript(logic.PERSIST_SCRIPT, "persist", logic.persistArgs(created, fresh, "1")).status, 0)
+  assert.equal(fs.statSync(fresh).mode & 0o777, 0o644)
+})
+
 test("persist keeps shell metacharacters in the file as plain text", (t) => {
   const dir = tempDir(t)
   const file = path.join(dir, "monitors.lua")
@@ -1155,16 +1343,30 @@ test("backupStamp is whole seconds", () => {
 
 // ---------------------------------------------------------------- payload
 
-test("parsePayload reads dryRun and an absolute monitorsFile", () => {
+test("parsePayload honors monitorsFile only in a dry run", () => {
   const fallback = "/home/x/.config/hypr/monitors.lua"
   assert.deepEqual(logic.parsePayload("{}", fallback), { dryRun: false, monitorsFile: fallback })
   assert.deepEqual(logic.parsePayload("", fallback), { dryRun: false, monitorsFile: fallback })
   assert.deepEqual(logic.parsePayload("not json", fallback), { dryRun: false, monitorsFile: fallback })
   assert.deepEqual(logic.parsePayload("{\"dryRun\":true}", fallback), { dryRun: true, monitorsFile: fallback })
-  assert.deepEqual(logic.parsePayload("{\"monitorsFile\":\"/tmp/try.lua\"}", fallback),
-    { dryRun: false, monitorsFile: "/tmp/try.lua" })
+  assert.deepEqual(logic.parsePayload("{\"dryRun\":true,\"monitorsFile\":\"/tmp/try.lua\"}", fallback),
+    { dryRun: true, monitorsFile: "/tmp/try.lua" })
+  // A live run never leaves the real file, so Keep cannot be aimed elsewhere.
+  for (const live of [
+    "{\"monitorsFile\":\"/tmp/try.lua\"}",
+    "{\"dryRun\":false,\"monitorsFile\":\"/tmp/try.lua\"}",
+    "{\"dryRun\":\"no\",\"monitorsFile\":\"/home/x/.ssh/authorized_keys\"}"
+  ]) assert.deepEqual(logic.parsePayload(live, fallback), { dryRun: false, monitorsFile: fallback }, live)
   for (const bad of ["relative.lua", "/tmp/../etc/x.lua", "/tmp/a\nb.lua", 5, null])
-    assert.equal(logic.parsePayload(JSON.stringify({ monitorsFile: bad }), fallback).monitorsFile, fallback)
+    assert.equal(logic.parsePayload(JSON.stringify({ dryRun: true, monitorsFile: bad }), fallback).monitorsFile, fallback)
+})
+
+test("tokenName is digits, a dash, digits", () => {
+  assert.equal(logic.tokenName(1700000000123, 0.5), "1700000000123-500000000")
+  assert.equal(logic.tokenName(1700000000123, 0), "1700000000123-0")
+  assert.match(logic.tokenName(Date.now(), Math.random()), /^[0-9]+-[0-9]+$/)
+  for (const bad of [undefined, -1, 1, NaN, "x"])
+    assert.match(logic.tokenName(5, bad), /^5-0$/, String(bad))
 })
 
 // ----------------------------------------------------------------- canvas

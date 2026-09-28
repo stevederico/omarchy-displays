@@ -1059,7 +1059,7 @@ function upsertManagedBlock(text, block) {
 
 // Everything Apply and Keep will do, computed up front and side-effect
 // free. options: { snapshot, layout, fileText, fileState }
-//   fileState: "present" | "missing" | anything else (unreadable)
+//   fileState: "present" | "missing" | "toolarge" | anything else (unreadable)
 function buildPlan(options) {
   var opts = options || {}
   var snapshot = opts.snapshot || []
@@ -1091,7 +1091,11 @@ function buildPlan(options) {
   plan.revertLua = revert
   plan.block = managedBlock(layout, known, configured)
 
-  if (fileState !== "present" && fileState !== "missing") {
+  if (fileState === "toolarge") {
+    warnings.push({ code: "file-too-large",
+                    message: "monitors.lua is over " + Math.floor(MAX_ARG_BYTES / 1024)
+                             + " KiB. Keep will not save" })
+  } else if (fileState !== "present" && fileState !== "missing") {
     warnings.push({ code: "file-unreadable",
                     message: "monitors.lua cannot be read. Keep will not save" })
   } else {
@@ -1166,6 +1170,29 @@ function watchdogSeconds(seconds) {
 // positional argument, never spliced into the script text. Each argument is
 // held under MAX_ARG_BYTES (see above).
 
+// Shell helpers for the token files. Tokens live in one owner-only folder.
+// private_dir makes it when it is missing and refuses anything that is not a
+// real folder we own, so a symlink planted there is never written through.
+// put_file creates a private temp file next to the target (mktemp opens it
+// exclusively under an unpredictable name) and renames it into place, so a
+// symlink already at the target is replaced, never followed. Text is
+// optional. Both return non-zero on failure.
+var PRIVATE_DIR_FUNCTION = [
+  "private_dir() {",
+  "  [ ! -L \"$1\" ] || return 1",
+  "  if [ ! -e \"$1\" ]; then",
+  "    mkdir -p -- \"$(dirname -- \"$1\")\" && mkdir -m 700 -- \"$1\" || return 1",
+  "  fi",
+  "  [ -d \"$1\" ] && [ ! -L \"$1\" ] && [ -O \"$1\" ] || return 1",
+  "  chmod 700 -- \"$1\"",
+  "}",
+  "put_file() {",
+  "  tmp=$(mktemp -- \"$1.tmp.XXXXXX\") || return 1",
+  "  if { [ -z \"$2\" ] || printf '%s\\n' \"$2\" > \"$tmp\"; } && mv -fT -- \"$tmp\" \"$1\"; then return 0; fi",
+  "  rm -f -- \"$tmp\"; return 1",
+  "}"
+].join("\n")
+
 // Puts the session back. `hyprctl reload` is the primary path: monitors.lua
 // is not written until Keep, so a reload restores the saved arrangement with
 // everything the rules set (vrr, bitdepth, color management, and so on).
@@ -1208,8 +1235,9 @@ var REVERT_SCRIPT = [
 //   $1 token path   $2 fallback Lua   $3 seconds   $4 hyprctl binary
 var WATCHDOG_SCRIPT = [
   "token=\"$1\"; lua=\"$2\"; secs=\"$3\"; hyprctl=\"${4:-hyprctl}\"",
-  "mkdir -p -m 700 -- \"$(dirname -- \"$token\")\" || exit 1",
-  "echo \"$$\" > \"$token.live\" || exit 1",
+  PRIVATE_DIR_FUNCTION,
+  "private_dir \"$(dirname -- \"$token\")\" || exit 1",
+  "put_file \"$token.live\" \"$$\" || exit 1",
   "trap 'rm -f -- \"$token.live\"' EXIT",
   REVERT_FUNCTION,
   "stand_down() {",
@@ -1232,11 +1260,14 @@ var WATCHDOG_SCRIPT = [
 
 // Prints how many watchdogs are still armed in the token folder, and
 // clears what dead ones left behind: a .live whose pid is gone or belongs
-// to another program, and .keep/.done/.revert with no live watchdog.
+// to another program, and .keep/.done/.revert with no live watchdog. Temp
+// files a killed writer left behind go too. Anything but a real folder we
+// own counts as empty and is left alone.
 //   $1 token folder
 var SCAN_SCRIPT = [
   "dir=\"$1\"",
-  "if [ ! -d \"$dir\" ]; then echo 0; exit 0; fi",
+  "if [ -L \"$dir\" ] || [ ! -d \"$dir\" ] || [ ! -O \"$dir\" ]; then echo 0; exit 0; fi",
+  "find \"$dir\" -maxdepth 1 -type f -name '*.tmp.??????' -mmin +1 -delete 2>/dev/null",
   "live=0",
   "for f in \"$dir\"/*.live; do",
   "  [ -e \"$f\" ] || continue",
@@ -1265,39 +1296,57 @@ var RUN_SCRIPT = [
 ].join("\n")
 
 //   $1 file to create
-var TOUCH_SCRIPT = "mkdir -p -m 700 -- \"$(dirname -- \"$1\")\" && : > \"$1\""
+var TOUCH_SCRIPT = [
+  PRIVATE_DIR_FUNCTION,
+  "private_dir \"$(dirname -- \"$1\")\" && put_file \"$1\""
+].join("\n")
 
-// Prints one status line (present | missing | unreadable), then the file.
+// Prints one status line (present | toolarge | missing | unreadable), then
+// the file. Only a regular file of at most MAX_ARG_BYTES is streamed, and
+// head holds the stream to that even if the file grows after the check. A
+// file that grew is caught by PERSIST_SCRIPT, whose comparison then fails.
 //   $1 path
 var READ_SCRIPT = [
-  "if [ ! -e \"$1\" ]; then echo missing",
-  "elif [ -r \"$1\" ] && [ -f \"$1\" ]; then echo present; cat -- \"$1\"",
-  "else echo unreadable; fi"
+  "if [ ! -e \"$1\" ]; then echo missing; exit 0; fi",
+  "if [ ! -f \"$1\" ] || [ ! -r \"$1\" ]; then echo unreadable; exit 0; fi",
+  "size=$(wc -c < \"$1\" 2>/dev/null) || size=",
+  "case \"$size\" in ''|*[!0-9]*) echo unreadable; exit 0 ;; esac",
+  "size=$((size + 0))",
+  "if [ \"$size\" -gt " + MAX_ARG_BYTES + " ]; then echo toolarge; exit 0; fi",
+  "echo present; head -c " + MAX_ARG_BYTES + " -- \"$1\""
 ].join("\n")
 
 // Backs the file up, then replaces it atomically. Refuses when the file
 // changed since it was read. Follows a symlink to the real file so a
-// stowed dotfile stays a symlink. Keeps the newest BACKUPS_KEPT backups;
-// a failed prune never fails the save.
+// stowed dotfile stays a symlink, but only to a regular .lua file we own
+// (exit 6). The new content goes to a private temp file with an unpredictable
+// name beside the target, then is renamed over it, so nothing already at a
+// predictable path is ever written through. The mode of the old file is kept.
+// Keeps the newest BACKUPS_KEPT backups; a failed prune never fails the save.
 //   $1 path   $2 new content   $3 content as read   $4 backup stamp
 //   $5 expected state (present | missing)
 var PERSIST_SCRIPT = [
   "path=\"$1\"; content=\"$2\"; original=\"$3\"; stamp=\"$4\"; expect=\"$5\"",
   "target=\"$path\"",
-  "if [ -e \"$path\" ]; then target=\"$(readlink -f -- \"$path\")\" || exit 2; fi",
+  "if [ -e \"$path\" ]; then",
+  "  target=\"$(readlink -f -- \"$path\")\" || exit 2",
+  "  [ -f \"$target\" ] && [ -O \"$target\" ] || exit 6",
+  "  case \"$target\" in *.lua) ;; *) exit 6 ;; esac",
+  "fi",
   "if [ -e \"$target\" ]; then",
   "  [ \"$expect\" = present ] || exit 3",
   "  current=\"$(cat -- \"$target\")\" || exit 2",
   "  [ \"$current\" = \"$original\" ] || exit 3",
-  "  while [ -e \"$target.bak.$stamp\" ]; do stamp=$((stamp + 1)); done",
+  "  while [ -e \"$target.bak.$stamp\" ] || [ -L \"$target.bak.$stamp\" ]; do stamp=$((stamp + 1)); done",
   "  cp -p -- \"$target\" \"$target.bak.$stamp\" || exit 4",
   "else",
   "  [ \"$expect\" = missing ] || exit 3",
   "  mkdir -p -- \"$(dirname -- \"$target\")\" || exit 2",
   "fi",
-  "tmp=\"$target.tmp.$$\"",
+  "tmp=$(mktemp -- \"$target.tmp.XXXXXX\") || exit 5",
+  "if [ -e \"$target\" ]; then chmod --reference=\"$target\" -- \"$tmp\"; else chmod 644 -- \"$tmp\"; fi || { rm -f -- \"$tmp\"; exit 5; }",
   "printf '%s' \"$content\" > \"$tmp\" || { rm -f -- \"$tmp\"; exit 5; }",
-  "mv -f -- \"$tmp\" \"$target\" || { rm -f -- \"$tmp\"; exit 5; }",
+  "mv -fT -- \"$tmp\" \"$target\" || { rm -f -- \"$tmp\"; exit 5; }",
   "stamps=$(for f in \"$target\".bak.*; do",
   "  s=\"${f##*.bak.}\"",
   "  case \"$s\" in ''|*[!0-9]*) continue ;; esac",
@@ -1390,6 +1439,7 @@ function parseReadOutput(text) {
   var body = newline < 0 ? "" : source.substring(newline + 1)
   if (status === "present") return { state: "present", text: body }
   if (status === "missing") return { state: "missing", text: "" }
+  if (status === "toolarge") return { state: "toolarge", text: "" }
   return { state: "unreadable", text: "" }
 }
 
@@ -1411,6 +1461,7 @@ function persistError(exitCode) {
   if (code === 3) return "monitors.lua changed since it was read. Nothing was saved"
   if (code === 4) return "Could not back up monitors.lua. Nothing was saved"
   if (code === 5) return "Could not write monitors.lua"
+  if (code === 6) return "monitors.lua is a link to something other than a .lua file you own. Nothing was saved"
   return "Could not save monitors.lua (exit " + code + ")"
 }
 
@@ -1418,9 +1469,20 @@ function backupStamp(nowMs) {
   return String(Math.floor(Number(nowMs) / 1000))
 }
 
+// A token file name: digits, a dash, digits. The token folder is owner-only
+// and files are created exclusively in it, so this only has to be unique.
+function tokenName(nowMs, random) {
+  var r = Number(random)
+  if (!(r >= 0 && r < 1)) r = 0
+  return String(Math.floor(Number(nowMs) || 0)) + "-" + String(Math.floor(r * 1e9))
+}
+
 // ---------------------------------------------------------------- payload
 
 // Summon payload: {"dryRun": true, "monitorsFile": "/abs/path.lua"}.
+// monitorsFile is honored only in a dry run, where Apply changes nothing and
+// Keep cannot be reached. A live run always uses defaultPath, so a summon
+// payload can never aim Keep at another file.
 function parsePayload(payloadJson, defaultPath) {
   var out = { dryRun: false, monitorsFile: String(defaultPath || "") }
   var data = null
@@ -1432,7 +1494,7 @@ function parsePayload(payloadJson, defaultPath) {
   if (!data || typeof data !== "object") return out
   if (data.dryRun === true || data.dryRun === "true") out.dryRun = true
   var file = data.monitorsFile
-  if (typeof file === "string" && file.charAt(0) === "/" && luaQuote(file) !== null
+  if (out.dryRun && typeof file === "string" && file.charAt(0) === "/" && luaQuote(file) !== null
       && file.indexOf("/../") < 0)
     out.monitorsFile = file
   return out
@@ -1574,6 +1636,7 @@ if (typeof module !== "undefined") {
     persistArgs: persistArgs,
     persistError: persistError,
     backupStamp: backupStamp,
+    tokenName: tokenName,
     parsePayload: parsePayload,
     canvasTransform: canvasTransform,
     toCanvas: toCanvas,

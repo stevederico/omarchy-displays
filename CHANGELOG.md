@@ -3,6 +3,14 @@
 - rotation control
 - enable and disable displays
 
+0.5.1
+
+  Limit payload path
+  Cap file reads
+  Use private tokens
+  Rename temp saves
+  Check link target
+
 0.5.0
 
   Add marketplace preview
