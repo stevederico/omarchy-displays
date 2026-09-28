@@ -3,6 +3,10 @@
 - rotation control
 - enable and disable displays
 
+0.5.0
+
+  Add marketplace preview
+
 0.4.0
 
   Prepare marketplace listing
