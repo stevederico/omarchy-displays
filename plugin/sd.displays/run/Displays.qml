@@ -26,7 +26,9 @@ Item {
   property bool dryRun: false
   readonly property string defaultMonitorsPath: Quickshell.env("HOME") + "/.config/hypr/monitors.lua"
   property string monitorsPath: root.defaultMonitorsPath
-  readonly property string runtimeDir: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omarchy-displays"
+  // Watchdog tokens live in an owner-only folder, never a shared temp folder.
+  readonly property string runtimeDir: (Quickshell.env("XDG_RUNTIME_DIR")
+                                        || Quickshell.env("HOME") + "/.local/state/omarchy") + "/omarchy-displays"
 
   property var snapshot: []
   property var layout: []

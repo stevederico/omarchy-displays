@@ -3,6 +3,13 @@
 - rotation control
 - enable and disable displays
 
+0.4.0
+
+  Prepare marketplace listing
+  Use owner-only tokens
+  Drop inner manifest
+  Reword safety notes
+
 0.3.0
 
   Keep configured refresh

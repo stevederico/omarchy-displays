@@ -91,7 +91,7 @@ hl.monitor({ output = "desc:Samsung Electric Company U28H75x", mode = "3840x2160
 ## Requirements and safety
 
 - Omarchy Quattro with the Quickshell shell and Hyprland (Lua config).
-- No sudo, installer, package manager, service, or network access.
+- No sudo or pkexec is required. No network access.
 - Runs `hyprctl monitors all -j` (read), `hyprctl eval` (on Apply, and as
   the fallback revert), and `hyprctl reload` (the revert).
 - Writes `monitors.lua` and its backups on Keep, and short-lived token files
@@ -154,9 +154,9 @@ omarchy-shell shell summon io.github.stevederico.omarchy-displays '{"dryRun":tru
 Save to a scratch file instead of the real `monitors.lua`:
 
 ```sh
-cp ~/.config/hypr/monitors.lua /tmp/monitors-try.lua
+cp ~/.config/hypr/monitors.lua ~/monitors-try.lua
 omarchy-shell shell summon io.github.stevederico.omarchy-displays \
-  '{"monitorsFile":"/tmp/monitors-try.lua"}'
+  '{"monitorsFile":"'"$HOME"'/monitors-try.lua"}'
 ```
 
 Print the current plan from a terminal while the window is open:
@@ -234,8 +234,8 @@ happens in a temp folder.
 `qmllint` needs an import path where the shell is reachable as `qs`:
 
 ```sh
-mkdir -p /tmp/qs-lint && ln -sfn "$OMARCHY_PATH/shell" /tmp/qs-lint/qs
-/usr/lib/qt6/bin/qmllint -I /tmp/qs-lint -I "$OMARCHY_PATH/shell" \
+lint_dir=$(mktemp -d) && ln -s "$OMARCHY_PATH/shell" "$lint_dir/qs"
+/usr/lib/qt6/bin/qmllint -I "$lint_dir" -I "$OMARCHY_PATH/shell" \
   plugin/sd.displays/run/Displays.qml
 ```
 

@@ -1208,7 +1208,7 @@ var REVERT_SCRIPT = [
 //   $1 token path   $2 fallback Lua   $3 seconds   $4 hyprctl binary
 var WATCHDOG_SCRIPT = [
   "token=\"$1\"; lua=\"$2\"; secs=\"$3\"; hyprctl=\"${4:-hyprctl}\"",
-  "mkdir -p -- \"$(dirname -- \"$token\")\" || exit 1",
+  "mkdir -p -m 700 -- \"$(dirname -- \"$token\")\" || exit 1",
   "echo \"$$\" > \"$token.live\" || exit 1",
   "trap 'rm -f -- \"$token.live\"' EXIT",
   REVERT_FUNCTION,
@@ -1265,7 +1265,7 @@ var RUN_SCRIPT = [
 ].join("\n")
 
 //   $1 file to create
-var TOUCH_SCRIPT = "mkdir -p -- \"$(dirname -- \"$1\")\" && : > \"$1\""
+var TOUCH_SCRIPT = "mkdir -p -m 700 -- \"$(dirname -- \"$1\")\" && : > \"$1\""
 
 // Prints one status line (present | missing | unreadable), then the file.
 //   $1 path
